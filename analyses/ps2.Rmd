@@ -28,6 +28,7 @@ Now we're going to use qplot. qplot is the easy interface, meant to replace plot
 We're going to be using the diamonds dataset. This is a set of measurements of diamonds, along with their price etc.
 
 ```{r}
+library(ggplot2) # not finding diamonds data if ggplot library not loaded in same chunk as diamonds called
 head(diamonds)
 qplot(diamonds$carat, diamonds$price)
 ```
@@ -96,8 +97,7 @@ d + geom_point(aes(colour = carat)) # and you can keep doing this to add layers 
 Try writing this as a single set of additions (e.g. one line of R code, though you can put in linebreaks). This is the most common workflow for me. 
 
 ```{r}
-(ggplot(diamonds, aes(x = carat, y = price, colour = carat))
-  + geom_point())
+ggplot(diamonds, aes(x = carat, y = price, colour = carat)) + geom_point()
 ```
 
 You can also set the aesthetic separately for each geom, and make some great plots this way. Though this can get complicated. Try using `ggplot` to build a histogram of prices. 
@@ -127,7 +127,7 @@ Data Prep
 First read in two data files and subject info. A and B refer to different trial order counterbalances. 
 
 ```{r}
-subinfo <- read.csv("../data/sklar_expt6_subinfo_corrected.csv")
+wsubinfo <- read.csv("../data/sklar_expt6_subinfo_corrected.csv")
 d.a <- read.csv("../data/sklar_expt6a_corrected.csv")
 d.b <- read.csv("../data/sklar_expt6b_corrected.csv")
 ```
@@ -135,16 +135,25 @@ d.b <- read.csv("../data/sklar_expt6b_corrected.csv")
 Gather these datasets into long form and get rid of the Xs in the headers.
 
 ```{r}
+d.a.long <- gather(d.a, subid, rt, X1:X21)
+d.a.long$subid <- sub('X', '', d.a.long$subid)
+
+d.b.long <- gather(d.b, subid, rt, X22:X42)
+d.b.long$subid <- sub('X', '', d.b.long$subid)
 ```
 
 Bind these together. Check out `bind_rows`.
 
 ```{r}
+d.all.long <- bind_rows(d.a.long, d.b.long)
 ```
 
 Merge these with subject info. You will need to look into merge and its relatives, `left_join` and `right_join`. Call this dataframe `d`, by convention. 
 
 ```{r}
+d.all.long$subid <- as.numeric(d.all.long$subid) # match data types across data frames
+d <- left_join(d.all.long, wsubinfo)
+stopifnot(nrow(d) == nrow(d.all.long)) # should preserve length
 ```
 
 Clean up the factor structure.
@@ -160,21 +169,38 @@ Data Analysis Preliminaries
 Examine the basic properties of the dataset. First, take a histogram.
 
 ```{r}
+ggplot(d, aes(x = rt)) + geom_histogram()
 ```
 
 Challenge question: what is the sample rate of the input device they are using to gather RTs?
 
 ```{r}
+# plot RTs
+ggplot(d, aes(x = rt)) + geom_histogram(binwidth = 1)
+# zoom in
+ggplot(d, aes(x = rt)) + geom_histogram(binwidth = 1) + scale_x_continuous(limits = c(500, 600)) # zoom in
+# get numbers
+table(d$rt[d$rt > 500 & d$rt < 600])
 ```
+
+```It looks like the sample rate is 36 ms, with some rounding errors of +/- 1 ms.```
 
 Sklar et al. did two manipulation checks. Subjective - asking participants whether they saw the primes - and objective - asking them to report the parity of the primes (even or odd) to find out if they could actually read the primes when they tried. Examine both the unconscious and conscious manipulation checks (this information is stored in subinfo). What do you see? Are they related to one another?
 
 ```{r} 
+wsubinfo <- mutate(wsubinfo, inclusion.status = ifelse(objective.test < .6 & subjective.test == 0, 'kept', 'dropped'))
+ggplot(wsubinfo, aes(x = objective.test, y = subjective.test)) + geom_point(aes(color = inclusion.status), alpha = .5, size = 5)
+summary(glm(subjective.test ~ objective.test, wsubinfo, family = "binomial"))
+```
+
+```
+There is a large dynamic range of objective test score, and also a large number of participants who reported being able to see the numbers. As such, many participants were dropped for failing to meet the inclusion criteria. It also looks like there is a positive relationship between the objective and subjective tests, which was confirmed by logistic regression.
 ```
 
 OK, let's turn back to the measure and implement Sklar et al.'s exclusion criterion. You need to have said you couldn't see (subjective test) and also be not significantly above chance on the objective test (< .6 correct). Call your new data frame `ds`.
 
 ```{r}
+ds <- d[d$objective.test < .6 & d$subjective.test == 0, ]
 ```
 
 Sklar et al.'s analysis
@@ -185,18 +211,42 @@ Sklar et al. show a plot of a "facilitation effect" - the time to respond to inc
 HINT: first take averages within subjects, then compute your error bars across participants, using the `sem` function (defined above). 
 
 ```{r}
+# subject data
+d.subj <- summarise(group_by(ds, subid, operand, presentation.time, congruent, objective.test), rt = mean(rt, na.rm = TRUE)) %>%
+          spread(congruent, rt) %>%
+          mutate(facilitation = no - yes)
+
+# summarize data
+d.summary <- summarise(group_by(d.subj, operand, presentation.time), facilitation.mean = mean(facilitation), facilitation.sem = sem(facilitation))
 ```
 
 Now plot this summary, giving more or less the bar plot that Sklar et al. gave (though I would keep operation as a variable here. Make sure you get some error bars on there (e.g. `geom_errorbar` or `geom_linerange`). 
 
 ```{r}
+(ggplot(subset(d.summary, operand == 'subtraction'), aes(x = presentation.time, y = facilitation.mean)) 
+        + geom_bar(stat = "identity")
+        + geom_errorbar(aes(ymin = facilitation.mean - facilitation.sem, ymax = facilitation.mean + facilitation.sem), width = .5))
+
+# check 2000 ms condition
+t.test(d.subj[d.subj$operand == 'subtraction' & d.subj$presentation.time == 2000, ]$facilitation)
 ```
 
 What do you see here? How close is it to what Sklar et al. report? Do the error bars match? How do you interpret these data? 
 
+```
+The means in tihs plot match the plot by Sklar et al. and suggest that participants respond more quickly following the congruent relative to the incongruent primes (at least in the 1700 ms condition; p = .055 in the 2000 ms condition; but the main effect of congruency is significant). The error bars do not match the plots by Sklar et al., as they are twice as large as those in the paper. 
+```
+
 Challenge problem: verify Sklar et al.'s claim about the relationship between RT and the objective manipulation check.
 
 ```{r}
+ggplot(d.subj, aes(x = objective.test, y = facilitation, color = operand)) + geom_point(size = 3) + geom_smooth(method = 'lm')
+
+summary(lm(facilitation ~ objective.test, data = d.subj, subset = operand == "subtraction"))
+```
+
+```
+Sklar et al. report that in Experiment 7 there was a negative relationship between scores on the objective test and facilitation scores (I believe this analysis was restricted to the subtraction condition). In other words, any conscious awareness of the primes was actually hurting rather than driving their effect. This relationship is not replicated in Experiment 6. There is no significant relationship between the objective test and facilitation scores (in the subtraction condition), and numerically the relationship is positive rather than negative. 
 ```
 
 Your own analysis
@@ -204,10 +254,40 @@ Your own analysis
 
 Show us what you would do with these data, operating from first principles. What's the fairest plot showing a test of Sklar et al.'s original hypothesis that people can do arithmetic "non-consciously"?
 
+```
+The fairest plots would either be (a) collapsing across presentation time and operand, or (b) reporting the data for all cells of the presentation time x operand design. Both are implemented below. 
+```
+
 ```{r}
+# summary for main effects
+d.summary.main <- summarise(group_by(ds, subid, congruent), rt = mean(rt, na.rm = TRUE)) %>%
+                  spread(congruent, rt) %>%
+                  mutate(facilitation = no - yes) %>%
+                  summarise(facilitation.mean = mean(facilitation), facilitation.sem = sem(facilitation))
+
+(ggplot(d.summary.main, aes(x = 0, y = facilitation.mean)) 
+       + geom_bar(stat = "identity")
+       + geom_errorbar(aes(ymin = facilitation.mean - facilitation.sem, ymax = facilitation.mean + facilitation.sem), width = .5)
+       + scale_x_continuous(limits = (c(-1, 1)), breaks = c(), name = ""))
+
+
+# show all four cells
+(ggplot(d.summary, aes(x = presentation.time, y = facilitation.mean)) 
+        + geom_bar(stat = "identity")
+        + geom_errorbar(aes(ymin = facilitation.mean - facilitation.sem, ymax = facilitation.mean + facilitation.sem), width = .5)
+        + facet_grid(. ~ operand))
 ```
 
 Challenge problem: Do you find any statistical support for Sklar et al.'s findings?
 
 ```{r}
+# t-test
+d.subj.clps <- summarise(group_by(ds, subid, congruent), rt = mean(rt, na.rm = TRUE)) %>%
+               spread(congruent, rt) %>%
+               mutate(facilitation = no - yes)
+t.test(d.subj.clps$facilitation)
+```
+
+```
+Computing a facilitation score for each subject that collapses across operands and then collapsing these facilitation scores across presentation time does not yield a significant priming effect, t(16) = 1.67, p = .11.
 ```
